@@ -9,9 +9,11 @@
 // tables stay plaintext/indexed throughout — only the user's *selection*
 // of which catalog entries apply to them is encrypted at rest.
 //
-// Rows whose *Enc field is still null (not yet backfilled, or a
-// custom-entry-only row with no catalog id) are skipped, matching the
-// existing behavior of filtering on `<field>Id: { not: null }`.
+// Rows whose *Enc field is still null (not yet backfilled by
+// scripts/encrypt-existing-data.ts) fall back to the original plaintext
+// `<field>Id` column, which every row - pre- or post-migration - still
+// has populated; only a custom-entry-only row (no catalog id at all) is
+// skipped.
 //
 // Returns data shaped exactly for ailmentsToFlagInputs /
 // preferencesToFlagInputs / journalEntriesToFlagInputs in
@@ -68,22 +70,28 @@ export async function getUserFlagSources(
 
   const [userAilmentRows, userPreferenceRows, userJournalRows] = await Promise.all([
     prisma.userAilment.findMany({
-      where: { userId, ailmentIdEnc: { not: null } },
-      select: { ailmentIdEnc: true },
+      where: { userId, OR: [{ ailmentIdEnc: { not: null } }, { ailmentId: { not: null } }] },
+      select: { ailmentId: true, ailmentIdEnc: true },
     }),
     prisma.userPreference.findMany({
-      where: { userId, preferenceIdEnc: { not: null } },
-      select: { preferenceIdEnc: true },
+      where: { userId, OR: [{ preferenceIdEnc: { not: null } }, { preferenceId: { not: null } }] },
+      select: { preferenceId: true, preferenceIdEnc: true },
     }),
     prisma.userJournalEntry.findMany({
-      where: { userId, conditionIdEnc: { not: null } },
-      select: { conditionIdEnc: true },
+      where: { userId, OR: [{ conditionIdEnc: { not: null } }, { conditionId: { not: null } }] },
+      select: { conditionId: true, conditionIdEnc: true },
     }),
   ]);
 
-  const ailmentIds = uniqueNonNull(userAilmentRows.map((r) => safeDecrypt(r.ailmentIdEnc)));
-  const preferenceIds = uniqueNonNull(userPreferenceRows.map((r) => safeDecrypt(r.preferenceIdEnc)));
-  const conditionIds = uniqueNonNull(userJournalRows.map((r) => safeDecrypt(r.conditionIdEnc)));
+  const ailmentIds = uniqueNonNull(
+    userAilmentRows.map((r) => (r.ailmentIdEnc ? safeDecrypt(r.ailmentIdEnc) : r.ailmentId))
+  );
+  const preferenceIds = uniqueNonNull(
+    userPreferenceRows.map((r) => (r.preferenceIdEnc ? safeDecrypt(r.preferenceIdEnc) : r.preferenceId))
+  );
+  const conditionIds = uniqueNonNull(
+    userJournalRows.map((r) => (r.conditionIdEnc ? safeDecrypt(r.conditionIdEnc) : r.conditionId))
+  );
 
   const ailments = ailmentIds.length
     ? includeIngredientSources
