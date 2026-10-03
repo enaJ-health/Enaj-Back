@@ -278,6 +278,14 @@ export async function POST(request: Request) {
       cleaned = cleaned.replace(/\s*\[/g, ", ");
       cleaned = cleaned.replace(/\]/g, "");
     }
+
+    // Treat a period immediately followed by a capital letter (no space,
+    // or one space, before the next word) as an ingredient separator too —
+    // USDA's raw ingredient text sometimes runs separate ingredients
+    // together this way (e.g. "...FRESHNESS.VITAMINS..." or
+    // "PHOSPHATE. VITAMIN E"). A period followed by lowercase or a digit
+    // is left alone, which keeps normal abbreviations intact.
+    cleaned = cleaned.replace(/\.\s*(?=[A-Z])/g, ", ");
     
     // Split on commas
     return cleaned
