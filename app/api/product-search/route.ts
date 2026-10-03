@@ -6,6 +6,7 @@ const DATABASES = {
     beauty: "https://us.openbeautyfacts.org",
     products: "https://us.openproductsfacts.org",
   };
+const USDA_API_KEY = process.env.USDA_API_KEY;
 
 // GET /api/product-search?q=nutella&source=food&page=1&pageSize=20
 // GET /api/product-search?q=shampoo&source=beauty
@@ -22,8 +23,10 @@ export async function GET(request: Request) {
       .replace(/\s+/g, ' ')         // normalize spaces
       .trim()
     const source = searchParams.get("source") || "all";
+    const category = searchParams.get("category") || "";
     const page = searchParams.get("page") || "1";
     const pageSize = searchParams.get("pageSize") || "20";
+    const includeUSDA = category === "food";
 
     if (!query) {
       return NextResponse.json(
@@ -53,30 +56,31 @@ export async function GET(request: Request) {
       );
     }
 
-    const allProducts: any[] = [];
     let totalCount = 0;
 
-    for (const db of databasesToSearch) {
-      const url = new URL(`${db.url}/cgi/search.pl`);
-      url.searchParams.set("search_terms", query);
-      url.searchParams.set("json", "true");
-      url.searchParams.set("fields", "code,product_name,brands,ingredients_text,image_url,packaging_text_en,categories_tags_en,allergens_tags");
-      url.searchParams.set("page", page);
-      url.searchParams.set("page_size", "20");
-      url.searchParams.set("action", "process");
+    const [usdaResults, dbResultsArrays] = await Promise.all([
+      includeUSDA ? searchUSDA(query) : Promise.resolve([]),
+      Promise.all(
+        databasesToSearch.map(async (db) => {
+          const url = new URL(`${db.url}/cgi/search.pl`);
+          url.searchParams.set("search_terms", query);
+          url.searchParams.set("json", "true");
+          url.searchParams.set("fields", "code,product_name,brands,ingredients_text,image_url,packaging_text_en,categories_tags_en,allergens_tags");
+          url.searchParams.set("page", page);
+          url.searchParams.set("page_size", "20");
+          url.searchParams.set("action", "process");
 
-      try {
-        const response = await fetch(url.toString(), {
-          headers: { "User-Agent": "Enaj/1.0 (https://enaj.app)" },
-        });
+          try {
+            const response = await fetch(url.toString(), {
+              headers: { "User-Agent": "Enaj/1.0 (https://enaj.app)" },
+            });
 
-        if (response.ok) {
-          const data = await response.json();
-          totalCount += data.count || 0;
+            if (!response.ok) return { products: [] as any[], count: 0 };
 
-          const products = (data.products || [])
-            .filter((p: any) => p.product_name)
-            .map((p: any) => ({
+            const data = await response.json();
+            const products = (data.products || [])
+              .filter((p: any) => p.product_name)
+              .map((p: any) => ({
                 barcode: p.code || null,
                 name: p.product_name || "Unknown Product",
                 brand: p.brands || "Unknown Brand",
@@ -88,11 +92,21 @@ export async function GET(request: Request) {
                 source: db.name,
               }));
 
-          allProducts.push(...products);
-        }
-      } catch (err) {
-        console.error(`Error fetching from ${db.name}:`, err);
-      }
+            return { products, count: data.count || 0 };
+          } catch (err) {
+            console.error(`Error fetching from ${db.name}:`, err);
+            return { products: [] as any[], count: 0 };
+          }
+        })
+      ),
+    ]);
+
+    const allProducts: any[] = [...usdaResults];
+    totalCount += usdaResults.length;
+
+    for (const { products, count } of dbResultsArrays) {
+      allProducts.push(...products);
+      totalCount += count;
     }
 
     // If no results, retry with just the first word (broader search)
@@ -151,6 +165,39 @@ export async function GET(request: Request) {
       { error: "Failed to search products" },
       { status: 500 }
     );
+  }
+}
+
+async function searchUSDA(query: string): Promise<any[]> {
+  if (!USDA_API_KEY) return [];
+
+  try {
+    const url = new URL("https://api.nal.usda.gov/fdc/v1/foods/search");
+    url.searchParams.set("query", query);
+    url.searchParams.set("api_key", USDA_API_KEY);
+    url.searchParams.set("pageSize", "20");
+    url.searchParams.set("dataType", "Branded");
+
+    const response = await fetch(url.toString());
+    if (!response.ok) return [];
+
+    const data = await response.json();
+    return (data.foods || [])
+      .filter((f: any) => f.ingredients)
+      .map((f: any) => ({
+        barcode: f.gtinUpc || null,
+        name: f.description || "Unknown Product",
+        brand: f.brandOwner || f.brandName || "Unknown Brand",
+        image: "",
+        ingredients: parseIngredients(f.ingredients),
+        packaging: [],
+        allergens: [],
+        category: "food",
+        source: "usda",
+      }));
+  } catch (err) {
+    console.error("Error fetching from USDA:", err);
+    return [];
   }
 }
 
